@@ -1,0 +1,136 @@
+// translator.js (socket + Google STT/Translate/TTS via server)
+
+const languageMap = {
+    English: {
+        translate: "en",
+        tts: "en-US"
+    },
+    Hindi: {
+        translate: "hi",
+        tts: "hi-IN"
+    },
+    Spanish: {
+        translate: "es",
+        tts: "es-ES"
+    },
+    French: {
+        translate: "fr",
+        tts: "fr-FR"
+    },
+    German: {
+        translate: "de",
+        tts: "de-DE"
+    }
+};
+
+let mediaRecorder = null;
+let recorderActive = false;
+let playbackQueue = Promise.resolve();
+
+function getSelectedLanguage() {
+    const select = document.getElementById("languageSelect");
+    const label = select ? select.value : "English";
+    return languageMap[label] || languageMap.English;
+}
+
+function canRecord() {
+    if (!localStream) return false;
+    const audioTrack = localStream.getAudioTracks()[0];
+    return Boolean(audioTrack && audioTrack.enabled && audioTrack.readyState === "live");
+}
+
+function pickAudioMimeType() {
+    const candidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm"
+    ];
+    for (const type of candidates) {
+        if (MediaRecorder.isTypeSupported(type)) {
+            return type;
+        }
+    }
+    return "";
+}
+
+async function sendAudioChunk(blob) {
+    if (!blob || !blob.size) return;
+    if (typeof socket === "undefined") return;
+    if (!canRecord()) return;
+
+    const buffer = await blob.arrayBuffer();
+    const lang = getSelectedLanguage();
+    socket.emit("audio-data", {
+        audioBuffer: buffer,
+        translateCode: lang.translate,
+        ttsCode: lang.tts
+    });
+}
+
+function startRecorder() {
+    if (!localStream) return;
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+
+    if (mediaRecorder && recorderActive) return;
+
+    const mimeType = pickAudioMimeType();
+    const options = mimeType ? {
+        mimeType
+    } : undefined;
+
+    try {
+        mediaRecorder = new MediaRecorder(
+            new MediaStream([audioTrack]),
+            options
+        );
+    } catch (err) {
+        console.error("MediaRecorder error:", err);
+        return;
+    }
+
+    mediaRecorder.ondataavailable = (event) => {
+        sendAudioChunk(event.data).catch(() => {});
+    };
+
+    mediaRecorder.onstop = () => {
+        recorderActive = false;
+    };
+
+    recorderActive = true;
+    mediaRecorder.start(3000);
+}
+
+function stopRecorder() {
+    if (!mediaRecorder) return;
+    if (mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+    }
+}
+
+function bindTranslationPlayback() {
+    if (typeof socket === "undefined") return;
+    socket.on("translated-audio", (data) => {
+        if (!data || !data.audio) return;
+        const audio = new Audio(`data:audio/mp3;base64,${data.audio}`);
+        playbackQueue = playbackQueue
+            .catch(() => {})
+            .then(() => audio.play().catch(() => {}));
+    });
+}
+
+function monitorRecorderState() {
+    setInterval(() => {
+        if (!canRecord()) {
+            stopRecorder();
+            return;
+        }
+        startRecorder();
+    }, 1000);
+}
+
+function initTranslationPipeline() {
+    bindTranslationPlayback();
+    monitorRecorderState();
+}
+
+window.addEventListener("load", initTranslationPipeline);
